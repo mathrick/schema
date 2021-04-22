@@ -14,6 +14,7 @@ __all__ = [
     "Schema",
     "And",
     "Or",
+    "Fail",
     "Regex",
     "Optional",
     "Use",
@@ -21,6 +22,7 @@ __all__ = [
     "Const",
     "Literal",
     "SchemaError",
+    "SchemaFailError",
     "SchemaWrongKeyError",
     "SchemaMissingKeyError",
     "SchemaForbiddenKeyError",
@@ -58,6 +60,26 @@ class SchemaError(Exception):
         if error_list:
             return "\n".join(error_list)
         return "\n".join(data_set)
+
+
+class SchemaFailError(SchemaError):
+    """Error which will result in an immediate failure of validation. If
+    this exception is raised during validation, it will be propagated
+    without being further wrapped in SchemaError. An application can
+    subclass it to allow for fine-grained control over fatal
+    validation errors.
+
+    Preferred usage is through the Fail validator:
+
+    Schema(Or(str, Fail())).validate(...)
+
+    class NumericValueRequiredError(SchemaFailError):
+        pass
+
+    Schema(Or(int, float, Fail(NumericValueRequiredError))).validate(...)
+    """
+
+    pass
 
 
 class SchemaWrongKeyError(SchemaError):
@@ -159,12 +181,25 @@ class Or(And):
                 if self.match_count > 1 and self.only_one:
                     break
                 return validation
+            except SchemaFailError:
+                raise
             except SchemaError as _x:
                 autos += _x.autos
                 errors += _x.errors
         raise SchemaError(
             ["%r did not validate %r" % (self, data)] + autos,
             [self._error.format(data) if self._error else None] + errors,
+        )
+
+
+class Fail(object):
+    def __init__(self, exc_class=SchemaFailError, error=None):
+        self.exc_class, self._error = exc_class, error
+
+    def validate(self, data):
+        raise self.exc_class(
+            ["Fatal error while validating %r" % data],
+            [self._error.format(data) if self._error else None],
         )
 
 
@@ -243,6 +278,8 @@ class Use(object):
     def validate(self, data):
         try:
             return self._callable(data)
+        except SchemaFailError:
+            raise
         except SchemaError as x:
             raise SchemaError([None] + x.autos, [self._error.format(data) if self._error else None] + x.errors)
         except BaseException as x:
@@ -327,6 +364,8 @@ class Schema(object):
         """
         try:
             self.validate(data)
+        except SchemaFailError:
+            raise
         except SchemaError:
             return False
         else:
@@ -374,6 +413,8 @@ class Schema(object):
                         svalue = s[skey]
                         try:
                             nkey = Schema(skey, error=e).validate(key)
+                        except SchemaFailError:
+                            raise
                         except SchemaError:
                             pass
                         else:
@@ -388,12 +429,16 @@ class Schema(object):
                                 # work well in combination with Optional.
                                 try:
                                     nvalue = Schema(svalue, error=e).validate(value)
+                                except SchemaFailError:
+                                    raise
                                 except SchemaError:
                                     continue
                                 skey.handler(nkey, data, e)
                             else:
                                 try:
                                     nvalue = Schema(svalue, error=e, ignore_extra_keys=i).validate(value)
+                                except SchemaFailError:
+                                    raise
                                 except SchemaError as x:
                                     k = "Key '%s' error:" % nkey
                                     message = self._prepend_schema_name(k)
@@ -432,6 +477,8 @@ class Schema(object):
         if flavor == VALIDATOR:
             try:
                 return s.validate(data)
+            except SchemaFailError:
+                raise
             except SchemaError as x:
                 raise SchemaError([None] + x.autos, [e.format(data) if e else None] + x.errors)
             except BaseException as x:
@@ -443,6 +490,8 @@ class Schema(object):
             try:
                 if s(data):
                     return data
+            except SchemaFailError:
+                raise
             except SchemaError as x:
                 raise SchemaError([None] + x.autos, [e.format(data) if e else None] + x.errors)
             except BaseException as x:
